@@ -1,0 +1,31 @@
+name: Stock Quant Auto Alert
+
+on:
+  schedule:
+    # UTC 21:30 = 한국 시간(KST) 오전 06:30 (미국장 마감 직후)
+    - cron: '30 21 * * 1-5'
+    # UTC 07:00 = 한국 시간(KST) 오후 16:00 (국내장 마감 직후)
+    - cron: '0 7 * * 1-5'
+  workflow_dispatch: # 웹에서 'Run workflow' 버튼으로 언제든 즉시 수동 실행 가능
+
+jobs:
+  run-scanner:
+    runs-on: ubuntu-latest
+    steps:
+      - name: 코드 불러오기
+        uses: actions/checkout@v3
+
+      - name: 파이썬 3.10 설정
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.10'
+
+      - name: 필요 라이브러리 설치
+        run: |
+          pip install yfinance numpy pandas requests
+
+      - name: 스캐너 실행
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: python main.py
