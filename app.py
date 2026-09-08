@@ -34,44 +34,68 @@ def send_telegram_alert(token, chat_id, message):
 
 
 # ==========================================
-# 1. 미국 주식 연산 (CBOE CDN + Stooq 연동)
+# 1. 미국 주식 연산 (Z-Score 정상화 및 2중 시세망)
 # ==========================================
 @st.cache_data(ttl=300)
 def get_us_stock_data(ticker_symbol):
+    import io
+    import re
+    import requests
+    from datetime import datetime
+    import pandas as pd
+    import numpy as np
+
     ticker_symbol = ticker_symbol.upper().strip()
     current_price, ma20, std20, z_score = None, None, None, 0.0
+    headers = {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36'
+    }
 
-    # 1) 주가 이력 조회 (Stooq 무료 데이터망)
+    # 1) 주가 이력 조회 (Stooq 헤더 직접 요청 -> 차단 우회)
     try:
         stooq_url = f"https://stooq.com/q/d/l/?s={ticker_symbol.lower()}.us&i=d"
-        df_hist = pd.read_csv(stooq_url)
-        df_hist.columns = [c.capitalize() for c in df_hist.columns]
-        
-        if not df_hist.empty and 'Close' in df_hist.columns and len(df_hist) >= 20:
+        res_stooq = requests.get(stooq_url, headers=headers, timeout=5)
+        if res_stooq.status_code == 200 and 'Date' in res_stooq.text and 'Close' in res_stooq.text:
+            df_hist = pd.read_csv(io.StringIO(res_stooq.text))
+            df_hist.columns = [c.capitalize() for c in df_hist.columns]
             df_hist['Date'] = pd.to_datetime(df_hist['Date'])
-            df_hist = df_hist.sort_values('Date').reset_index(drop=True)
-            current_price = float(df_hist['Close'].iloc[-1])
-            ma20 = float(df_hist['Close'].rolling(20).mean().iloc[-1])
-            std20 = float(df_hist['Close'].rolling(20).std().iloc[-1])
-            z_score = (current_price - ma20) / std20 if std20 > 0 else 0.0
+            df_hist = df_hist.sort_values('Date').dropna(subset=['Close']).reset_index(drop=True)
+            if len(df_hist) >= 20:
+                current_price = float(df_hist['Close'].iloc[-1])
+                ma20 = float(df_hist['Close'].rolling(20).mean().iloc[-1])
+                std20 = float(df_hist['Close'].rolling(20).std().iloc[-1])
     except Exception:
         pass
 
-    # 2) 옵션 체인 및 Max Pain 연산 (CBOE 거래소 직결)
+    # 2) Stooq 지연 시 Yahoo v8 Chart API 백업 조회
+    if ma20 is None or std20 is None:
+        try:
+            chart_url = f"https://query1.finance.yahoo.com/v8/finance/chart/{ticker_symbol}?range=3mo&interval=1d"
+            res_chart = requests.get(chart_url, headers=headers, timeout=5)
+            if res_chart.status_code == 200:
+                closes = res_chart.json()['chart']['result'][0]['indicators']['quote'][0]['close']
+                valid_closes = [c for c in closes if c is not None]
+                if len(valid_closes) >= 20:
+                    s_close = pd.Series(valid_closes)
+                    current_price = float(s_close.iloc[-1])
+                    ma20 = float(s_close.rolling(20).mean().iloc[-1])
+                    std20 = float(s_close.rolling(20).std().iloc[-1])
+        except Exception:
+            pass
+
+    # 3) 옵션 체인 및 Max Pain 연산 (CBOE 거래소 직결)
     max_pain, call_wall, put_wall = None, None, None
     calls_df, puts_df, selected_exp = None, None, None
 
     try:
         cboe_url = f"https://cdn.cboe.com/api/global/delayed_quotes/options/{ticker_symbol}.json"
-        headers = {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36'
-        }
         res = requests.get(cboe_url, headers=headers, timeout=8)
 
         if res.status_code == 200:
             cboe_data = res.json().get('data', {})
-            if current_price is None:
-                current_price = float(cboe_data.get('current_price', 0.0))
+            cboe_price = float(cboe_data.get('current_price', 0.0))
+            if cboe_price > 0:
+                current_price = cboe_price
 
             raw_options = cboe_data.get('options', [])
             if raw_options:
@@ -125,6 +149,10 @@ def get_us_stock_data(ticker_symbol):
     except Exception:
         pass
 
+    # 4) 최종 Z-Score 산출
+    if current_price and ma20 and std20 and std20 > 0:
+        z_score = (current_price - ma20) / std20
+
     if current_price is None:
         return None
 
@@ -139,7 +167,6 @@ def get_us_stock_data(ticker_symbol):
         'calls': calls_df,
         'puts': puts_df
     }
-
 
 # ==========================================
 # 2. 한국 주식 연산 (네이버 금융 직결)
