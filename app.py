@@ -230,12 +230,13 @@ def get_kr_stock_data(ticker_symbol):
         resistance = float(above[np.argmax(above_vol)]) if len(above) > 0 and len(above_vol) > 0 else current_price * 1.05
         support = float(below[np.argmax(below_vol)]) if len(below) > 0 and len(below_vol) > 0 else current_price * 0.95
 
-        return {
+return {
             'price': current_price,
             'resistance': resistance,
             'support': support,
             'z_score': z_score,
             'df': df,
+            'ohlcv': df,         # 차트 렌더링용 키 추가
             'df_ohlcv': df
         }
 
