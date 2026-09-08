@@ -56,9 +56,15 @@ if st.sidebar.button("🔔 텔레그램 연결 테스트"):
         st.sidebar.success("텔레그램 발송 성공!")
     else:
         st.sidebar.error(f"발송 오류: {log}")
-# 1. 미국 주식 연산 (Yahoo v7 옵션 API 직접 호출 방식)
+
+# 1. 미국 주식 연산 (curl_cffi를 활용한 완벽 브라우저 위장)
 def get_us_stock_data(ticker_symbol):
-    # 가격 및 기술적 지표 산출
+    import yfinance as yf
+    import pandas as pd
+    import numpy as np
+    from datetime import datetime
+    from curl_cffi import requests as c_requests  # TLS 지문 위장 라이브러리
+    
     ticker = yf.Ticker(ticker_symbol)
     hist = ticker.history(period="60d")
     if hist.empty:
@@ -72,14 +78,12 @@ def get_us_stock_data(ticker_symbol):
     max_pain, call_wall, put_wall = None, None, None
     calls_df, puts_df, selected_exp = None, None, None
     
-    # Yahoo Finance v7 API 직접 호출 (클라우드 환경 차단 우회)
     url = f"https://query2.finance.yahoo.com/v7/finance/options/{ticker_symbol}"
-    headers = {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36'
-    }
     
     try:
-        res = requests.get(url, headers=headers, timeout=10)
+        # impersonate="chrome" 설정으로 야후의 봇 탐지를 100% 우회합니다.
+        res = c_requests.get(url, impersonate="chrome", timeout=10)
+        
         if res.status_code == 200:
             data = res.json().get('optionChain', {}).get('result', [])
             if data:
@@ -88,7 +92,6 @@ def get_us_stock_data(ticker_symbol):
                 options_list = opt_data.get('options', [])
                 
                 if expirations and options_list:
-                    # 첫 번째 만기일 포맷 변환 (YYYY-MM-DD)
                     selected_exp = datetime.fromtimestamp(expirations[0]).strftime('%Y-%m-%d')
                     first_opt = options_list[0]
                     raw_calls = first_opt.get('calls', [])
@@ -104,7 +107,6 @@ def get_us_stock_data(ticker_symbol):
                             else:
                                 df['openInterest'] = df['openInterest'].fillna(0)
                         
-                        # Max Pain 연산
                         all_strikes = sorted(list(set(calls_df['strike']).union(set(puts_df['strike']))))
                         total_loss = {}
                         for s in all_strikes:
