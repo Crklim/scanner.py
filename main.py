@@ -82,18 +82,23 @@ if __name__ == "__main__":
     us_signals = scan_us()
     kr_signals = scan_kr()
     
-    msg_lines = ["📡 *[GitHub 자동 스캔 브리핑]*\n"]
+    msg_lines = ["📡 *[GitHub 퀀트 레이더 정기 스캔]*\n"]
     if us_signals:
         msg_lines.append("🇺🇸 *미국 주식 수급 시그널:*")
         msg_lines.extend(us_signals)
         msg_lines.append("")
+    else:
+        msg_lines.append("🇺🇸 *미국 주식:* 특이 과열/침체/Wall 종목 없음 (중립)")
+        msg_lines.append("")
+
     if kr_signals:
         msg_lines.append("🇰🇷 *국내 주식 수급 시그널:*")
         msg_lines.extend(kr_signals)
         msg_lines.append("")
-        
-    if us_signals or kr_signals:
-        send_telegram("\n".join(msg_lines))
-        print("알림 전송 완료")
     else:
-        print("감지된 특이 시그널 없음")
+        msg_lines.append("🇰🇷 *국내 주식:* 특이 과열/침체 종목 없음 (중립)")
+        msg_lines.append("")
+        
+    # 특이 종목이 없더라도 정상 스캔 완료 브리핑을 항상 발송
+    send_telegram("\n".join(msg_lines))
+    print("텔레그램 브리핑 전송 완료!")
