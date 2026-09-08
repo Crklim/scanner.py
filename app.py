@@ -57,9 +57,14 @@ if st.sidebar.button("🔔 텔레그램 연결 테스트"):
     else:
         st.sidebar.error(f"발송 오류: {log}")
 
-# 1. 미국 주식 연산 (옵션 체인 세션 헤더 및 만기일 탐색 보강)
+# 1. 미국 주식 연산 (세션 헤더 브라우저 위장 추가)
 def get_us_stock_data(ticker_symbol):
-    ticker = yf.Ticker(ticker_symbol)
+    session = requests.Session()
+    session.headers.update({
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36'
+    })
+    
+    ticker = yf.Ticker(ticker_symbol, session=session)
     hist = ticker.history(period="60d")
     if hist.empty:
         return None
@@ -75,20 +80,19 @@ def get_us_stock_data(ticker_symbol):
     try:
         expirations = ticker.options
         if expirations:
-            # 첫 번째 만기일부터 순차 탐색하여 미결제약정이 있는 유효한 옵션 체인 확보
-            for exp in expirations[:3]:
+            # 유효한 미결제약정이 존재하는 첫 번째 만기일 탐색
+            for exp in expirations[:5]:
                 try:
                     opt_chain = ticker.option_chain(exp)
                     c = opt_chain.calls
                     p = opt_chain.puts
-                    if not c.empty and not p.empty and (c['openInterest'].fillna(0).sum() > 0 or p['openInterest'].fillna(0).sum() > 0):
+                    if not c.empty and not p.empty:
                         calls, puts, selected_exp = c, p, exp
                         break
                 except Exception:
                     continue
 
             if calls is not None and puts is not None:
-                # Max Pain 연산
                 strikes = sorted(list(set(calls['strike']).union(set(puts['strike']))))
                 total_loss = {}
                 for s in strikes:
@@ -103,7 +107,7 @@ def get_us_stock_data(ticker_symbol):
                     call_wall = calls.loc[calls['openInterest'].fillna(0).idxmax()]['strike']
                 if not puts.empty and puts['openInterest'].fillna(0).sum() > 0:
                     put_wall = puts.loc[puts['openInterest'].fillna(0).idxmax()]['strike']
-    except Exception as e:
+    except Exception:
         pass
             
     return {
