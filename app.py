@@ -56,15 +56,10 @@ if st.sidebar.button("🔔 텔레그램 연결 테스트"):
         st.sidebar.success("텔레그램 발송 성공!")
     else:
         st.sidebar.error(f"발송 오류: {log}")
-
-# 1. 미국 주식 연산 (세션 헤더 브라우저 위장 추가)
+# 1. 미국 주식 연산 (Yahoo v7 옵션 API 직접 호출 방식)
 def get_us_stock_data(ticker_symbol):
-    session = requests.Session()
-    session.headers.update({
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36'
-    })
-    
-    ticker = yf.Ticker(ticker_symbol, session=session)
+    # 가격 및 기술적 지표 산출
+    ticker = yf.Ticker(ticker_symbol)
     hist = ticker.history(period="60d")
     if hist.empty:
         return None
@@ -75,38 +70,55 @@ def get_us_stock_data(ticker_symbol):
     z_score = (current_price - ma20) / std20 if std20 > 0 else 0
     
     max_pain, call_wall, put_wall = None, None, None
-    calls, puts, selected_exp = None, None, None
+    calls_df, puts_df, selected_exp = None, None, None
+    
+    # Yahoo Finance v7 API 직접 호출 (클라우드 환경 차단 우회)
+    url = f"https://query2.finance.yahoo.com/v7/finance/options/{ticker_symbol}"
+    headers = {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36'
+    }
     
     try:
-        expirations = ticker.options
-        if expirations:
-            # 유효한 미결제약정이 존재하는 첫 번째 만기일 탐색
-            for exp in expirations[:5]:
-                try:
-                    opt_chain = ticker.option_chain(exp)
-                    c = opt_chain.calls
-                    p = opt_chain.puts
-                    if not c.empty and not p.empty:
-                        calls, puts, selected_exp = c, p, exp
-                        break
-                except Exception:
-                    continue
-
-            if calls is not None and puts is not None:
-                strikes = sorted(list(set(calls['strike']).union(set(puts['strike']))))
-                total_loss = {}
-                for s in strikes:
-                    call_loss = np.maximum(0, s - calls['strike']) * calls['openInterest'].fillna(0)
-                    put_loss = np.maximum(0, puts['strike'] - s) * puts['openInterest'].fillna(0)
-                    total_loss[s] = call_loss.sum() + put_loss.sum()
+        res = requests.get(url, headers=headers, timeout=10)
+        if res.status_code == 200:
+            data = res.json().get('optionChain', {}).get('result', [])
+            if data:
+                opt_data = data[0]
+                expirations = opt_data.get('expirationDates', [])
+                options_list = opt_data.get('options', [])
                 
-                if total_loss:
-                    max_pain = min(total_loss, key=total_loss.get)
+                if expirations and options_list:
+                    # 첫 번째 만기일 포맷 변환 (YYYY-MM-DD)
+                    selected_exp = datetime.fromtimestamp(expirations[0]).strftime('%Y-%m-%d')
+                    first_opt = options_list[0]
+                    raw_calls = first_opt.get('calls', [])
+                    raw_puts = first_opt.get('puts', [])
                     
-                if not calls.empty and calls['openInterest'].fillna(0).sum() > 0:
-                    call_wall = calls.loc[calls['openInterest'].fillna(0).idxmax()]['strike']
-                if not puts.empty and puts['openInterest'].fillna(0).sum() > 0:
-                    put_wall = puts.loc[puts['openInterest'].fillna(0).idxmax()]['strike']
+                    if raw_calls or raw_puts:
+                        calls_df = pd.DataFrame(raw_calls) if raw_calls else pd.DataFrame(columns=['strike', 'openInterest'])
+                        puts_df = pd.DataFrame(raw_puts) if raw_puts else pd.DataFrame(columns=['strike', 'openInterest'])
+                        
+                        for df in [calls_df, puts_df]:
+                            if 'openInterest' not in df.columns:
+                                df['openInterest'] = 0
+                            else:
+                                df['openInterest'] = df['openInterest'].fillna(0)
+                        
+                        # Max Pain 연산
+                        all_strikes = sorted(list(set(calls_df['strike']).union(set(puts_df['strike']))))
+                        total_loss = {}
+                        for s in all_strikes:
+                            call_loss = np.maximum(0, s - calls_df['strike']) * calls_df['openInterest']
+                            put_loss = np.maximum(0, puts_df['strike'] - s) * puts_df['openInterest']
+                            total_loss[s] = call_loss.sum() + put_loss.sum()
+                        
+                        if total_loss:
+                            max_pain = min(total_loss, key=total_loss.get)
+                            
+                        if not calls_df.empty and calls_df['openInterest'].sum() > 0:
+                            call_wall = calls_df.loc[calls_df['openInterest'].idxmax()]['strike']
+                        if not puts_df.empty and puts_df['openInterest'].sum() > 0:
+                            put_wall = puts_df.loc[puts_df['openInterest'].idxmax()]['strike']
     except Exception:
         pass
             
@@ -118,8 +130,8 @@ def get_us_stock_data(ticker_symbol):
         'max_pain': max_pain,
         'call_wall': call_wall,
         'put_wall': put_wall,
-        'calls': calls,
-        'puts': puts
+        'calls': calls_df,
+        'puts': puts_df
     }
 
 # 2. 한국 주식 연산
