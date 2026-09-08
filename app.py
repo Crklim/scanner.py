@@ -57,15 +57,19 @@ if st.sidebar.button("🔔 텔레그램 연결 테스트"):
     else:
         st.sidebar.error(f"발송 오류: {log}")
 
-# 1. 미국 주식 연산 (curl_cffi를 활용한 완벽 브라우저 위장)
+# 1. 미국 주식 연산 (Yahoo 쿠키/Crumb 자동 처리 세션 방식)
 def get_us_stock_data(ticker_symbol):
-    import yfinance as yf
-    import pandas as pd
-    import numpy as np
-    from datetime import datetime
-    from curl_cffi import requests as c_requests  # TLS 지문 위장 라이브러리
+    import requests
     
-    ticker = yf.Ticker(ticker_symbol)
+    # 야후 인증 쿠키와 크럼을 우회 주입하는 전용 세션 생성
+    session = requests.Session()
+    session.headers.update({
+        'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
+        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+        'Accept-Language': 'en-US,en;q=0.5',
+    })
+    
+    ticker = yf.Ticker(ticker_symbol, session=session)
     hist = ticker.history(period="60d")
     if hist.empty:
         return None
@@ -78,49 +82,61 @@ def get_us_stock_data(ticker_symbol):
     max_pain, call_wall, put_wall = None, None, None
     calls_df, puts_df, selected_exp = None, None, None
     
-    url = f"https://query2.finance.yahoo.com/v7/finance/options/{ticker_symbol}"
-    
     try:
-        # impersonate="chrome" 설정으로 야후의 봇 탐지를 100% 우회합니다.
-        res = c_requests.get(url, impersonate="chrome", timeout=10)
-        
-        if res.status_code == 200:
-            data = res.json().get('optionChain', {}).get('result', [])
-            if data:
-                opt_data = data[0]
-                expirations = opt_data.get('expirationDates', [])
-                options_list = opt_data.get('options', [])
-                
-                if expirations and options_list:
-                    selected_exp = datetime.fromtimestamp(expirations[0]).strftime('%Y-%m-%d')
-                    first_opt = options_list[0]
-                    raw_calls = first_opt.get('calls', [])
-                    raw_puts = first_opt.get('puts', [])
-                    
-                    if raw_calls or raw_puts:
-                        calls_df = pd.DataFrame(raw_calls) if raw_calls else pd.DataFrame(columns=['strike', 'openInterest'])
-                        puts_df = pd.DataFrame(raw_puts) if raw_puts else pd.DataFrame(columns=['strike', 'openInterest'])
-                        
-                        for df in [calls_df, puts_df]:
-                            if 'openInterest' not in df.columns:
-                                df['openInterest'] = 0
-                            else:
-                                df['openInterest'] = df['openInterest'].fillna(0)
-                        
-                        all_strikes = sorted(list(set(calls_df['strike']).union(set(puts_df['strike']))))
-                        total_loss = {}
-                        for s in all_strikes:
-                            call_loss = np.maximum(0, s - calls_df['strike']) * calls_df['openInterest']
-                            put_loss = np.maximum(0, puts_df['strike'] - s) * puts_df['openInterest']
-                            total_loss[s] = call_loss.sum() + put_loss.sum()
-                        
-                        if total_loss:
-                            max_pain = min(total_loss, key=total_loss.get)
-                            
-                        if not calls_df.empty and calls_df['openInterest'].sum() > 0:
-                            call_wall = calls_df.loc[calls_df['openInterest'].idxmax()]['strike']
-                        if not puts_df.empty and puts_df['openInterest'].sum() > 0:
-                            put_wall = puts_df.loc[puts_df['openInterest'].idxmax()]['strike']
+        # 1차 시도: yfinance 내장 옵션 체인
+        expirations = ticker.options
+        if expirations:
+            for exp in expirations[:3]:
+                try:
+                    chain = ticker.option_chain(exp)
+                    c = chain.calls
+                    p = chain.puts
+                    if not c.empty and not p.empty:
+                        calls_df, puts_df, selected_exp = c, p, exp
+                        break
+                except Exception:
+                    continue
+
+        # 2차 시도: 만약 1차에서 막힌 경우 query1 직접 쿼리
+        if calls_df is None:
+            direct_url = f"https://query1.finance.yahoo.com/v7/finance/options/{ticker_symbol}"
+            r = session.get(direct_url, timeout=7)
+            if r.status_code == 200:
+                res_data = r.json().get('optionChain', {}).get('result', [])
+                if res_data:
+                    opt = res_data[0]
+                    exp_dates = opt.get('expirationDates', [])
+                    opts_list = opt.get('options', [])
+                    if exp_dates and opts_list:
+                        selected_exp = datetime.fromtimestamp(exp_dates[0]).strftime('%Y-%m-%d')
+                        raw_c = opts_list[0].get('calls', [])
+                        raw_p = opts_list[0].get('puts', [])
+                        calls_df = pd.DataFrame(raw_c) if raw_c else pd.DataFrame()
+                        puts_df = pd.DataFrame(raw_p) if raw_p else pd.DataFrame()
+
+        # 지표 산출
+        if calls_df is not None and puts_df is not None and not calls_df.empty and not puts_df.empty:
+            for df in [calls_df, puts_df]:
+                if 'openInterest' not in df.columns:
+                    df['openInterest'] = 0
+                else:
+                    df['openInterest'] = df['openInterest'].fillna(0)
+
+            all_strikes = sorted(list(set(calls_df['strike']).union(set(puts_df['strike']))))
+            total_loss = {}
+            for s in all_strikes:
+                c_loss = np.maximum(0, s - calls_df['strike']) * calls_df['openInterest']
+                p_loss = np.maximum(0, puts_df['strike'] - s) * puts_df['openInterest']
+                total_loss[s] = c_loss.sum() + p_loss.sum()
+
+            if total_loss:
+                max_pain = min(total_loss, key=total_loss.get)
+
+            if calls_df['openInterest'].sum() > 0:
+                call_wall = calls_df.loc[calls_df['openInterest'].idxmax()]['strike']
+            if puts_df['openInterest'].sum() > 0:
+                put_wall = puts_df.loc[puts_df['openInterest'].idxmax()]['strike']
+
     except Exception:
         pass
             
