@@ -170,35 +170,77 @@ def get_us_stock_data(ticker_symbol):
         'puts': puts_df
     }
 
-# 2. 한국 주식 연산
-def get_kr_stock_data(full_ticker):
-    ticker = yf.Ticker(full_ticker)
-    df_ohlcv = ticker.history(period="90d")
-    if df_ohlcv.empty:
+# 2. 한국 주식 연산 (네이버 금융 직결 / 클라우드 차단 원천 우회)
+@st.cache_data(ttl=300)
+def get_kr_stock_data(ticker_symbol):
+    import re
+    import requests
+    import pandas as pd
+    import numpy as np
+
+    # 티커에서 순수 6자리 종목코드만 추출 (예: '005930.KS' -> '005930')
+    code = re.sub(r'[^0-9]', '', str(ticker_symbol))
+    if not code:
         return None
-        
-    current_price = df_ohlcv['Close'].iloc[-1]
-    ma20 = df_ohlcv['Close'].rolling(window=20).mean().iloc[-1]
-    std20 = df_ohlcv['Close'].rolling(window=20).std().iloc[-1]
-    z_score = (current_price - ma20) / std20 if std20 > 0 else 0
-    
-    bins = np.linspace(df_ohlcv['Low'].min(), df_ohlcv['High'].max(), 15)
-    volume_profile, bin_edges = np.histogram(df_ohlcv['Close'], bins=bins, weights=df_ohlcv['Volume'])
-    
-    upper_bins = [i for i, edge in enumerate(bin_edges[:-1]) if edge > current_price]
-    lower_bins = [i for i, edge in enumerate(bin_edges[1:]) if edge < current_price]
-    
-    kr_resistance = bin_edges[upper_bins[np.argmax(volume_profile[upper_bins])]] if upper_bins else current_price * 1.05
-    kr_support = bin_edges[lower_bins[np.argmax(volume_profile[lower_bins])]] if lower_bins else current_price * 0.95
-    
-    return {
-        'price': current_price,
-        'ma20': ma20,
-        'z_score': z_score,
-        'resistance': kr_resistance,
-        'support': kr_support,
-        'ohlcv': df_ohlcv
+
+    # 네이버 금융 일봉 시세 API 호출 (90영업일)
+    url = f"https://fchart.stock.naver.com/sise.nhn?symbol={code}&timeframe=day&count=90&requestType=0"
+    headers = {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36'
     }
+
+    try:
+        res = requests.get(url, headers=headers, timeout=6)
+        if res.status_code != 200:
+            return None
+
+        # XML 파싱 (Date, Open, High, Low, Close, Volume)
+        items = re.findall(r'<item data="([^"]+)"', res.text)
+        if not items:
+            return None
+
+        records = [line.split('|') for line in items]
+        df = pd.DataFrame(records, columns=['Date', 'Open', 'High', 'Low', 'Close', 'Volume'])
+
+        for col in ['Open', 'High', 'Low', 'Close', 'Volume']:
+            df[col] = pd.to_numeric(df[col], errors='coerce')
+
+        df['Date'] = pd.to_datetime(df['Date'], format='%Y%m%d')
+        df = df.dropna().sort_values('Date').reset_index(drop=True)
+
+        if len(df) < 20:
+            return None
+
+        # 지표 산출
+        current_price = float(df['Close'].iloc[-1])
+        ma20 = float(df['Close'].rolling(20).mean().iloc[-1])
+        std20 = float(df['Close'].rolling(20).std().iloc[-1])
+        z_score = (current_price - ma20) / std20 if std20 > 0 else 0.0
+
+        # 매물대(Volume Profile) 분석: 15개 구간 히스토그램 분할
+        counts, bin_edges = np.histogram(df['Close'], bins=15, weights=df['Volume'])
+        bin_centers = (bin_edges[:-1] + bin_edges[1:]) / 2
+
+        above = bin_centers[bin_centers >= current_price]
+        above_vol = counts[bin_centers >= current_price]
+        below = bin_centers[bin_centers < current_price]
+        below_vol = counts[bin_centers < current_price]
+
+        # 저항선(현재가 위쪽 최대 매물대) / 지지선(현재가 아래쪽 최대 매물대)
+        resistance = float(above[np.argmax(above_vol)]) if len(above) > 0 and len(above_vol) > 0 else current_price * 1.05
+        support = float(below[np.argmax(below_vol)]) if len(below) > 0 and len(below_vol) > 0 else current_price * 0.95
+
+        return {
+            'price': current_price,
+            'resistance': resistance,
+            'support': support,
+            'z_score': z_score,
+            'df': df,
+            'df_ohlcv': df
+        }
+
+    except Exception:
+        return None
 
 # UI
 st.title("📈 수급 퀀트 레이더 대시보드")
