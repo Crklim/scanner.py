@@ -57,92 +57,110 @@ if st.sidebar.button("🔔 텔레그램 연결 테스트"):
     else:
         st.sidebar.error(f"발송 오류: {log}")
 
-# 1. 미국 주식 연산 (Yahoo 쿠키/Crumb 자동 처리 세션 방식)
+# 1. 미국 주식 연산 (CBOE 거래소 + Stooq 연동 / 클라우드 차단 원천 우회)
+@st.cache_data(ttl=300)
 def get_us_stock_data(ticker_symbol):
+    import re
     import requests
+    from datetime import datetime
+    import pandas as pd
+    import numpy as np
     
-    # 야후 인증 쿠키와 크럼을 우회 주입하는 전용 세션 생성
-    session = requests.Session()
-    session.headers.update({
-        'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
-        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
-        'Accept-Language': 'en-US,en;q=0.5',
-    })
+    ticker_symbol = ticker_symbol.upper().strip()
+    current_price, ma20, std20, z_score = None, None, None, 0.0
     
-    ticker = yf.Ticker(ticker_symbol, session=session)
-    hist = ticker.history(period="60d")
-    if hist.empty:
-        return None
-    
-    current_price = hist['Close'].iloc[-1]
-    ma20 = hist['Close'].rolling(window=20).mean().iloc[-1]
-    std20 = hist['Close'].rolling(window=20).std().iloc[-1]
-    z_score = (current_price - ma20) / std20 if std20 > 0 else 0
-    
+    # 1) 주가 이력 조회 (Stooq 무료 데이터망 활용 - IP 차단 없음)
+    try:
+        stooq_url = f"https://stooq.com/q/d/l/?s={ticker_symbol.lower()}.us&i=d"
+        df_hist = pd.read_csv(stooq_url)
+        df_hist.columns = [c.capitalize() for c in df_hist.columns]
+        
+        if not df_hist.empty and 'Close' in df_hist.columns and len(df_hist) >= 20:
+            df_hist['Date'] = pd.to_datetime(df_hist['Date'])
+            df_hist = df_hist.sort_values('Date').reset_index(drop=True)
+            current_price = float(df_hist['Close'].iloc[-1])
+            ma20 = float(df_hist['Close'].rolling(20).mean().iloc[-1])
+            std20 = float(df_hist['Close'].rolling(20).std().iloc[-1])
+            z_score = (current_price - ma20) / std20 if std20 > 0 else 0.0
+    except Exception:
+        pass
+
+    # 2) 옵션 체인 및 Max Pain 연산 (CBOE 공식 CDN 직접 호출)
     max_pain, call_wall, put_wall = None, None, None
     calls_df, puts_df, selected_exp = None, None, None
     
     try:
-        # 1차 시도: yfinance 내장 옵션 체인
-        expirations = ticker.options
-        if expirations:
-            for exp in expirations[:3]:
-                try:
-                    chain = ticker.option_chain(exp)
-                    c = chain.calls
-                    p = chain.puts
-                    if not c.empty and not p.empty:
-                        calls_df, puts_df, selected_exp = c, p, exp
-                        break
-                except Exception:
-                    continue
-
-        # 2차 시도: 만약 1차에서 막힌 경우 query1 직접 쿼리
-        if calls_df is None:
-            direct_url = f"https://query1.finance.yahoo.com/v7/finance/options/{ticker_symbol}"
-            r = session.get(direct_url, timeout=7)
-            if r.status_code == 200:
-                res_data = r.json().get('optionChain', {}).get('result', [])
-                if res_data:
-                    opt = res_data[0]
-                    exp_dates = opt.get('expirationDates', [])
-                    opts_list = opt.get('options', [])
-                    if exp_dates and opts_list:
-                        selected_exp = datetime.fromtimestamp(exp_dates[0]).strftime('%Y-%m-%d')
-                        raw_c = opts_list[0].get('calls', [])
-                        raw_p = opts_list[0].get('puts', [])
-                        calls_df = pd.DataFrame(raw_c) if raw_c else pd.DataFrame()
-                        puts_df = pd.DataFrame(raw_p) if raw_p else pd.DataFrame()
-
-        # 지표 산출
-        if calls_df is not None and puts_df is not None and not calls_df.empty and not puts_df.empty:
-            for df in [calls_df, puts_df]:
-                if 'openInterest' not in df.columns:
-                    df['openInterest'] = 0
-                else:
-                    df['openInterest'] = df['openInterest'].fillna(0)
-
-            all_strikes = sorted(list(set(calls_df['strike']).union(set(puts_df['strike']))))
-            total_loss = {}
-            for s in all_strikes:
-                c_loss = np.maximum(0, s - calls_df['strike']) * calls_df['openInterest']
-                p_loss = np.maximum(0, puts_df['strike'] - s) * puts_df['openInterest']
-                total_loss[s] = c_loss.sum() + p_loss.sum()
-
-            if total_loss:
-                max_pain = min(total_loss, key=total_loss.get)
-
-            if calls_df['openInterest'].sum() > 0:
-                call_wall = calls_df.loc[calls_df['openInterest'].idxmax()]['strike']
-            if puts_df['openInterest'].sum() > 0:
-                put_wall = puts_df.loc[puts_df['openInterest'].idxmax()]['strike']
-
+        cboe_url = f"https://cdn.cboe.com/api/global/delayed_quotes/options/{ticker_symbol}.json"
+        headers = {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36'
+        }
+        res = requests.get(cboe_url, headers=headers, timeout=8)
+        
+        if res.status_code == 200:
+            cboe_data = res.json().get('data', {})
+            
+            # 주가 보완 (Stooq 조회가 늦어졌을 때 CBOE 실시간가로 대체)
+            if current_price is None:
+                current_price = float(cboe_data.get('current_price', 0.0))
+                
+            raw_options = cboe_data.get('options', [])
+            if raw_options:
+                parsed_list = []
+                pattern = re.compile(r'^([A-Za-z0-9]+)(\d{2})(\d{2})(\d{2})([CP])(\d{8})$')
+                
+                for opt in raw_options:
+                    sym = opt.get('option', '')
+                    m = pattern.match(sym)
+                    if m:
+                        yy = int(m.group(2)) + 2000
+                        mm = int(m.group(3))
+                        dd = int(m.group(4))
+                        exp_str = f"{yy:04d}-{mm:02d}-{dd:02d}"
+                        opt_type = 'call' if m.group(5) == 'C' else 'put'
+                        strike = int(m.group(6)) / 1000.0
+                        oi = float(opt.get('open_interest', 0) or 0)
+                        
+                        parsed_list.append({
+                            'exp_date': exp_str,
+                            'type': opt_type,
+                            'strike': strike,
+                            'openInterest': oi
+                        })
+                
+                if parsed_list:
+                    df_all = pd.DataFrame(parsed_list)
+                    today_str = datetime.now().strftime('%Y-%m-%d')
+                    future_exps = sorted([d for d in df_all['exp_date'].unique() if d >= today_str])
+                    selected_exp = future_exps[0] if future_exps else sorted(df_all['exp_date'].unique())[0]
+                    
+                    target_df = df_all[df_all['exp_date'] == selected_exp]
+                    calls_df = target_df[target_df['type'] == 'call'][['strike', 'openInterest']].reset_index(drop=True)
+                    puts_df = target_df[target_df['type'] == 'put'][['strike', 'openInterest']].reset_index(drop=True)
+                    
+                    # Max Pain 산출
+                    all_strikes = sorted(list(set(calls_df['strike']).union(set(puts_df['strike']))))
+                    total_loss = {}
+                    for s in all_strikes:
+                        c_loss = np.maximum(0, s - calls_df['strike']) * calls_df['openInterest']
+                        p_loss = np.maximum(0, puts_df['strike'] - s) * puts_df['openInterest']
+                        total_loss[s] = c_loss.sum() + p_loss.sum()
+                    
+                    if total_loss:
+                        max_pain = min(total_loss, key=total_loss.get)
+                        
+                    if not calls_df.empty and calls_df['openInterest'].sum() > 0:
+                        call_wall = calls_df.loc[calls_df['openInterest'].idxmax()]['strike']
+                    if not puts_df.empty and puts_df['openInterest'].sum() > 0:
+                        put_wall = puts_df.loc[puts_df['openInterest'].idxmax()]['strike']
     except Exception:
         pass
-            
+        
+    if current_price is None:
+        return None
+        
     return {
         'price': current_price,
-        'ma20': ma20,
+        'ma20': ma20 if ma20 is not None else current_price,
         'z_score': z_score,
         'exp_date': selected_exp,
         'max_pain': max_pain,
