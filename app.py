@@ -192,11 +192,15 @@ with tab2:
         
     if data_kr:
         k1, k2, k3, k4 = st.columns(4)
-        k1.metric("현재가", f"{int(data_kr['price']):,}원")
-        k2.metric("매물대 저항선", f"{int(data_kr['resistance']):,}원")
-        k3.metric("매물대 지지선", f"{int(data_kr['support']):,}원")
-        k4.metric("가격 Z-Score (20D)", f"{data_kr['z_score']:+.2f} σ")
-        
+        price_val = f"{int(data_kr['price']):,}원" if pd.notnull(data_kr['price']) else "N/A"
+        res_val = f"{int(data_kr['resistance']):,}원" if pd.notnull(data_kr['resistance']) else "N/A"
+        sup_val = f"{int(data_kr['support']):,}원" if pd.notnull(data_kr['support']) else "N/A"
+        z_val = f"{data_kr['z_score']:+.2f} σ" if pd.notnull(data_kr['z_score']) else "N/A"
+
+        k1.metric("현재가", price_val)
+        k2.metric("매물대 저항선", res_val)
+        k3.metric("매물대 지지선", sup_val)
+        k4.metric("가격 Z-Score (20D)", z_val)
         df_chart = data_kr['ohlcv'].tail(40)
         fig_kr = go.Figure(data=[go.Candlestick(
             x=df_chart.index, open=df_chart['Open'], high=df_chart['High'],
