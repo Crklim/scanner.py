@@ -15,7 +15,7 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
-# --- 2. 텔레그램 발송 함수 ---
+# --- 2. 텔레그램 발송 유틸 ---
 def send_telegram_alert(token, chat_id, message):
     if not token or not chat_id:
         return False, "토큰 또는 Chat ID가 설정되지 않았습니다."
@@ -35,7 +35,7 @@ def send_telegram_alert(token, chat_id, message):
 
 
 # ==========================================
-# 3. 미국 주식 연산 (CBOE + Stooq / 역사적 고저점 & 200일선)
+# 3. 미국 주식 연산 (CBOE + Stooq / 52주 고저 & 200일선)
 # ==========================================
 @st.cache_data(ttl=300)
 def get_us_stock_data(ticker_symbol):
@@ -47,7 +47,7 @@ def get_us_stock_data(ticker_symbol):
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36'
     }
 
-    # 1) 주가 이력 조회 (Stooq 데이터망 - 1년치 일봉)
+    # 1) 주가 이력 조회 (Stooq 데이터망)
     try:
         stooq_url = f"https://stooq.com/q/d/l/?s={ticker_symbol.lower()}.us&i=d"
         res_stooq = requests.get(stooq_url, headers=headers, timeout=6)
@@ -70,7 +70,7 @@ def get_us_stock_data(ticker_symbol):
     except Exception:
         pass
 
-    # 2) Stooq 지연 시 Yahoo v8 Chart API 백업
+    # 2) Stooq 지연 시 Yahoo v8 Chart 백업
     if ma20 is None or high_52w is None:
         try:
             chart_url = f"https://query1.finance.yahoo.com/v8/finance/chart/{ticker_symbol}?range=1y&interval=1d"
@@ -92,7 +92,7 @@ def get_us_stock_data(ticker_symbol):
         except Exception:
             pass
 
-    # 3) 옵션 체인 및 Max Pain 연산 (CBOE 거래소 직결)
+    # 3) 옵션 체인 및 Max Pain (CBOE 거래소 직결)
     max_pain, call_wall, put_wall = None, None, None
     calls_df, puts_df, selected_exp = None, None, None
 
@@ -153,7 +153,7 @@ def get_us_stock_data(ticker_symbol):
     except Exception:
         pass
 
-    # 4) 지표 정규화 및 산출
+    # 4) 지표 정규화
     if current_price and ma20 and std20 and std20 > 0:
         z_score = (current_price - ma20) / std20
     if current_price and high_52w and low_52w and high_52w > low_52w:
@@ -182,7 +182,7 @@ def get_us_stock_data(ticker_symbol):
 
 
 # ==========================================
-# 4. 한국 주식 연산 (네이버 금융 / 300일 시세 기반)
+# 4. 한국 주식 연산 (네이버 금융 300일 시세)
 # ==========================================
 @st.cache_data(ttl=300)
 def get_kr_stock_data(ticker_symbol):
@@ -190,7 +190,6 @@ def get_kr_stock_data(ticker_symbol):
     if not code:
         return None
 
-    # 300영업일 조회 (52주 고저점 및 200일선 확보)
     url = f"https://fchart.stock.naver.com/sise.nhn?symbol={code}&timeframe=day&count=300&requestType=0"
     headers = {
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36'
@@ -222,7 +221,7 @@ def get_kr_stock_data(ticker_symbol):
         std20 = float(df['Close'].rolling(20).std().iloc[-1])
         z_score = (current_price - ma20) / std20 if std20 > 0 else 0.0
 
-        # 52주(최근 250일) 최고/최저 및 200일 이동평균선
+        # 52주 고저점 및 200일선
         df_1y = df.tail(250)
         high_52w = float(df_1y['High'].max())
         low_52w = float(df_1y['Low'].min())
@@ -231,7 +230,7 @@ def get_kr_stock_data(ticker_symbol):
         ma200 = float(df['Close'].rolling(200).mean().iloc[-1]) if len(df) >= 200 else None
         disp_200 = ((current_price - ma200) / ma200) * 100.0 if ma200 else None
 
-        # 매물대(Volume Profile) 분석: 최근 90일 거래량 가중치
+        # 매물대 분석
         counts, bin_edges = np.histogram(df['Close'].tail(90), bins=15, weights=df['Volume'].tail(90))
         bin_centers = (bin_edges[:-1] + bin_edges[1:]) / 2
         above = bin_centers[bin_centers >= current_price]
@@ -280,7 +279,7 @@ if st.sidebar.button("🔔 텔레그램 연결 테스트"):
 
 
 # ==========================================
-# 6. 메인 화면 UI
+# 6. 메인 UI (5대 섹터 큐레이션)
 # ==========================================
 st.title("📈 수급 퀀트 레이더 대시보드")
 
@@ -288,36 +287,41 @@ tab1, tab2 = st.tabs(["🇺🇸 미국 관심 종목", "🇰🇷 국내 관심 �
 
 # --- 미국 주식 탭 ---
 with tab1:
-    us_tickers = ["AMD", "NVDA", "TSLA", "AAPL", "MSFT", "MU", "AMZN", "GOOGL", "SPY", "QQQ"]
-    selected_us = st.selectbox("종목 선택", us_tickers, index=0, key="us_select")
+    us_sectors = {
+        "항공 & 우주 (Aviation / Aerospace)": ["SPCX", "RKLB", "BA", "DAL", "UAL"],
+        "반도체 (Semiconductors)": ["NVDA", "AMD", "TSM", "MU", "AVGO", "ASML", "QCOM"],
+        "블록체인 (Blockchain / Crypto)": ["COIN", "MSTR", "MARA", "CLSK", "BMNR"],
+        "AI & 빅테크 (AI / BigTech)": ["PLTR", "MSFT", "GOOGL", "META", "AMZN", "AAPL"],
+        "방산 (Defense)": ["LMT", "RTX", "NOC", "GD"]
+    }
+    
+    col_sec_us, col_sym_us = st.columns([1, 2])
+    with col_sec_us:
+        selected_us_sec = st.selectbox("섹터 선택", list(us_sectors.keys()), index=0, key="us_sec_sel")
+    with col_sym_us:
+        selected_us = st.selectbox("종목 선택", us_sectors[selected_us_sec], index=0, key="us_sym_sel")
+
+    if selected_us == "SPCX":
+        st.caption("ℹ️ SPCX: SpaceX (Space Exploration Technologies Corp.) 공식 나스닥 상장 티커")
 
     data_us = get_us_stock_data(selected_us)
 
     if data_us:
-        # 단기 수급 지표 (Row 1)
         m1, m2, m3, m4 = st.columns(4)
         m1.metric("현재가", f"${data_us['price']:,.2f}")
         m2.metric("Max Pain", f"${data_us['max_pain']:,.2f}" if data_us['max_pain'] else "N/A")
         m3.metric("Call Wall (저항)", f"${data_us['call_wall']:,.2f}" if data_us['call_wall'] else "N/A")
         m4.metric("Put Wall (지지)", f"${data_us['put_wall']:,.2f}" if data_us['put_wall'] else "N/A")
 
-        # 장기 역사적 위치 지표 (Row 2)
         h1, h2, h3 = st.columns(3)
         h1.metric("가격 Z-Score (20D)", f"{data_us['z_score']:+.2f} σ")
-        h2.metric(
-            "52주 레인지 위치",
-            f"{data_us['pos_52w']:.1f}%" if data_us['pos_52w'] is not None else "N/A",
-            help="0%에 가까울수록 52주 최저점 바닥권, 100%에 가까울수록 최고점 신고가권"
-        )
-        h3.metric(
-            "200일선 이격도",
-            f"{data_us['disp_200']:+.1f}%" if data_us['disp_200'] is not None else "N/A",
-            help="기관 1년 장기 매집선 대비 괴리율 (통상 -20% 이하는 과매도 침체, +25% 이상은 과열)"
-        )
+        h2.metric("52주 레인지 위치", f"{data_us['pos_52w']:.1f}%" if data_us['pos_52w'] is not None else "N/A",
+                  help="0%에 가까울수록 52주 최저점 바닥권, 100%에 가까울수록 최고점 신고가권")
+        h3.metric("200일선 이격도", f"{data_us['disp_200']:+.1f}%" if data_us['disp_200'] is not None else "N/A",
+                  help="기관 1년 장기 매집선 대비 괴리율 (상장 기간이 200일 미만인 신규주는 N/A)")
 
-        st.caption(f"기준 옵션 만기일: {data_us['exp_date'] if data_us['exp_date'] else '옵션 없음'}")
+        st.caption(f"기준 옵션 만기일: {data_us['exp_date'] if data_us['exp_date'] else '옵션 없음 (소형주 또는 신규 상장주)'}")
 
-        # 미결제약정(OI) 프로파일 차트
         calls = data_us['calls']
         puts = data_us['puts']
         if calls is not None and puts is not None and not calls.empty and not puts.empty:
@@ -356,22 +360,53 @@ with tab1:
 
 # --- 한국 주식 탭 ---
 with tab2:
-    kr_tickers = {
-        "한솔케미칼 (014680)": "014680",
-        "삼성전자 (005930)": "005930",
-        "SK하이닉스 (000660)": "000660",
-        "LG에너지솔루션 (373220)": "373220",
-        "에코프로비엠 (247540)": "247540",
-        "포스코홀딩스 (005490)": "005490",
-        "현대차 (005380)": "005380"
+    kr_sectors = {
+        "반도체 & IT 부품": {
+            "삼성전자 (005930)": "005930",
+            "SK하이닉스 (000660)": "000660",
+            "한미반도체 (042700)": "042700",
+            "리노공업 (058470)": "058470",
+            "피노 (033790)": "033790"
+        },
+        "전력 인프라 & AI 에너지": {
+            "LS ELECTRIC (010120)": "010120",
+            "HD현대일렉트릭 (267260)": "267260",
+            "효성중공업 (298040)": "298040"
+        },
+        "블록체인 / STO": {
+            "우리기술투자 (041190)": "041190",
+            "갤럭시아머니트리 (094480)": "094480",
+            "다날 (064260)": "064260"
+        },
+        "AI & 플랫폼": {
+            "NAVER (035420)": "035420",
+            "카카오 (035720)": "035720",
+            "루닛 (328130)": "328130",
+            "솔트룩스 (304100)": "304100"
+        },
+        "항공 & 우주": {
+            "대한항공 (003490)": "003490",
+            "한국항공우주 (047810)": "047810",
+            "쎄트렉아이 (099320)": "099320"
+        },
+        "방산": {
+            "한화에어로스페이스 (012450)": "012450",
+            "현대로템 (064350)": "064350",
+            "LIG넥스원 (079550)": "079550",
+            "한화시스템 (272210)": "272210"
+        }
     }
-    selected_kr_name = st.selectbox("종목 선택", list(kr_tickers.keys()), index=0, key="kr_select")
-    selected_kr_code = kr_tickers[selected_kr_name]
+
+    col_sec_kr, col_sym_kr = st.columns([1, 2])
+    with col_sec_kr:
+        selected_kr_sec = st.selectbox("섹터 선택", list(kr_sectors.keys()), index=0, key="kr_sec_sel")
+    with col_sym_kr:
+        selected_kr_name = st.selectbox("종목 선택", list(kr_sectors[selected_kr_sec].keys()), index=0, key="kr_sym_sel")
+        selected_kr_code = kr_sectors[selected_kr_sec][selected_kr_name]
 
     data_kr = get_kr_stock_data(selected_kr_code)
 
     if data_kr:
-        # 단기 매물대 수급 지표 (Row 1)
         k1, k2, k3 = st.columns(3)
         price_val = f"{int(data_kr['price']):,}원" if pd.notnull(data_kr['price']) else "N/A"
         res_val = f"{int(data_kr['resistance']):,}원" if pd.notnull(data_kr['resistance']) else "N/A"
@@ -381,21 +416,13 @@ with tab2:
         k2.metric("매물대 저항선", res_val)
         k3.metric("매물대 지지선", sup_val)
 
-        # 장기 역사적 위치 지표 (Row 2)
         kh1, kh2, kh3 = st.columns(3)
         kh1.metric("가격 Z-Score (20D)", f"{data_kr['z_score']:+.2f} σ")
-        kh2.metric(
-            "52주 레인지 위치",
-            f"{data_kr['pos_52w']:.1f}%" if data_kr['pos_52w'] is not None else "N/A",
-            help="0% 바닥권 ~ 100% 신고가권"
-        )
-        kh3.metric(
-            "200일선 이격도",
-            f"{data_kr['disp_200']:+.1f}%" if data_kr['disp_200'] is not None else "N/A",
-            help="200일 장기 이평선 대비 이격률"
-        )
+        kh2.metric("52주 레인지 위치", f"{data_kr['pos_52w']:.1f}%" if data_kr['pos_52w'] is not None else "N/A",
+                   help="0% 바닥권 ~ 100% 신고가권")
+        kh3.metric("200일선 이격도", f"{data_kr['disp_200']:+.1f}%" if data_kr['disp_200'] is not None else "N/A",
+                   help="200일 장기 이평선 대비 이격률")
 
-        # 캔들스틱 및 매물대 라인 차트
         df_chart = data_kr['ohlcv'].tail(45)
         fig_kr = go.Figure()
 
