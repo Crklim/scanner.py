@@ -279,7 +279,7 @@ if st.sidebar.button("🔔 텔레그램 연결 테스트"):
 
 
 # ==========================================
-# 6. 메인 UI (5대 섹터 큐레이션)
+# 6. 메인 UI (Tesla 포함 섹터 큐레이션)
 # ==========================================
 st.title("📈 수급 퀀트 레이더 대시보드")
 
@@ -288,10 +288,10 @@ tab1, tab2 = st.tabs(["🇺🇸 미국 관심 종목", "🇰🇷 국내 관심 �
 # --- 미국 주식 탭 ---
 with tab1:
     us_sectors = {
+        "AI & 빅테크 (AI / BigTech)": ["TSLA", "PLTR", "MSFT", "GOOGL", "META", "AMZN", "AAPL"],
         "항공 & 우주 (Aviation / Aerospace)": ["SPCX", "RKLB", "BA", "DAL", "UAL"],
         "반도체 (Semiconductors)": ["NVDA", "AMD", "TSM", "MU", "AVGO", "ASML", "QCOM"],
         "블록체인 (Blockchain / Crypto)": ["COIN", "MSTR", "MARA", "CLSK", "BMNR"],
-        "AI & 빅테크 (AI / BigTech)": ["PLTR", "MSFT", "GOOGL", "META", "AMZN", "AAPL"],
         "방산 (Defense)": ["LMT", "RTX", "NOC", "GD"]
     }
     
@@ -303,6 +303,8 @@ with tab1:
 
     if selected_us == "SPCX":
         st.caption("ℹ️ SPCX: SpaceX (Space Exploration Technologies Corp.) 공식 나스닥 상장 티커")
+    elif selected_us == "TSLA":
+        st.caption("ℹ️ TSLA: 테슬라 (옵션 Max Pain 및 52주 레인지 트래킹)")
 
     data_us = get_us_stock_data(selected_us)
 
